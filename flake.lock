@@ -1,0 +1,58 @@
+{
+  "nodes": {
+    "flake-utils": {
+      "inputs": {
+        "systems": "systems"
+      },
+      "locked": {
+        "lastModified": 1710146030,
+        "narHash": "sha256-SZ5L6eA7HJ/nmkzGG7/ISclqe6oZdOZTNoesiInkXPQ=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "b1d9ab70662946ef0850d488da1c9019f3a9752a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1722028010,
+        "narHash": "sha256-S48O6YPO8+kL1KBnJE1gwEWbkQj0QNZRum1zg05N4f0=",
+        "rev": "6525d2701549d244c65ef0656fe1488f0b5eef41",
+        "type": "tarball",
+        "url": "https://git.tatikoma.dev/api/v1/repos/corpix/nixpkgs/archive/6525d2701549d244c65ef0656fe1488f0b5eef41.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://git.tatikoma.dev/corpix/nixpkgs/archive/v2024-07-26.655033.tar.gz"
+      }
+    },
+    "root": {
+      "inputs": {
+        "flake-utils": "flake-utils",
+        "nixpkgs": "nixpkgs"
+      }
+    },
+    "systems": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

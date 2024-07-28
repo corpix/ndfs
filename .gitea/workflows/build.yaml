@@ -1,0 +1,23 @@
+name: build
+on:
+  pull_request:
+  push:
+    branches: master
+jobs:
+  build:
+    runs-on: nix
+    strategy:
+      matrix:
+        arch: [x86_64-linux]
+    steps:
+      - uses: actions/checkout@v3
+      - name: build package
+        run: >-
+          nix build --print-out-paths -L
+          .#packages.${{ matrix.arch }}.default
+          > out-paths
+      - name: update gcroot
+        run: >-
+          gcroot=$(echo ${{ github.repository }} | sed 's/\//-/g').${{ matrix.arch }};
+          rm -f /nix/var/nix/gcroots/per-user/$(whoami)/$gcroot || true;
+          ln -s $(tail -n 1 out-paths) /nix/var/nix/gcroots/per-user/$(whoami)/$gcroot

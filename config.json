@@ -1,0 +1,21 @@
+{
+  "client": {
+    "host": "127.0.0.1",
+    "port": 13666,
+    "ca-cert": "./ca-cert.pem",
+    "cert": "./client-cert.pem",
+    "key": "./client-key.pem",
+    "mount": "./tmp"
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 13666,
+    "ca-cert": "./ca-cert.pem",
+    "cert": "./server-cert.pem",
+    "key": "./server-key.pem",
+    "bind": {
+      "./": {"name": "root"},
+      "/tmp": {"name": "tmp"}
+    }
+  }
+}
