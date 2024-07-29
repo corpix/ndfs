@@ -33,6 +33,7 @@
           hivemind
           openssl
           netcat
+          tree
         ;
       };
     in {
