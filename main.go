@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
 	// "github.com/davecgh/go-spew/spew"
+	"os/exec"
+	"syscall"
 )
 
 type Config struct {
@@ -35,7 +38,14 @@ type ClientConfig struct {
 	Cert         string `json:"cert"`
 	Key          string `json:"key"`
 	tls          *tls.Config
-	Prefix       string `json:"prefix"`
+	Prefix       string         `json:"prefix"`
+	Handler      *HandlerConfig `json:"handler"`
+}
+
+type HandlerConfig struct {
+	Command     []string `json:"command"`
+	command     []string
+	Environment []string `json:"envirionment"`
 }
 
 type ServerConfig struct {
@@ -145,7 +155,18 @@ func config(path string) (*Config, error) {
 			RootCAs:      certPool,
 			MinVersion:   tls.VersionTLS12,
 		}
-
+		if cfg.Client.Handler != nil {
+			if len(cfg.Client.Handler.Command) > 0 {
+				cfg.Client.Handler.command = append(cfg.Client.Handler.command, cfg.Client.Handler.Command...)
+				cfg.Client.Handler.command[0], err = exec.LookPath(cfg.Client.Handler.Command[0])
+				if err != nil {
+					return nil, errors.Wrapf(
+						err, "failed to resolve executable path for command %v",
+						cfg.Client.Handler.Command,
+					)
+				}
+			}
+		}
 	}
 
 	if cfg.Server != nil {
@@ -231,10 +252,36 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create nats object store for files")
 	}
+
 	watcher, err := ob.Watch()
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create nats object store watcher")
 	}
+	updates := make(chan *natsClient.ObjectInfo)
+	go func() {
+		for update := range updates {
+			if cfg.Handler != nil {
+				if len(cfg.Handler.Command) > 0 {
+					cmd := exec.Command(cfg.Handler.command[0], cfg.Handler.command[1:]...)
+					env := os.Environ()
+					env = append(env, cfg.Handler.Environment...)
+					env = append(env, []string{
+						fmt.Sprintf("NDFS_UPDATE_NAME=%s", update.Name),
+						fmt.Sprintf("NDFS_UPDATE_MODE=%s", update.Metadata["mode"]),
+						fmt.Sprintf("NDFS_UPDATE_UID=%s", update.Metadata["uid"]),
+						fmt.Sprintf("NDFS_UPDATE_GID=%s", update.Metadata["gid"]),
+					}...)
+					cmd.Env = env
+					output, err := cmd.CombinedOutput()
+					if err != nil {
+						log.Error().Err(err).Msgf("command handler %v failure", cfg.Handler.Command)
+						continue
+					}
+					log.Info().Str("output", string(output)).Msgf("command handler %v finished", cfg.Handler.Command)
+				}
+			}
+		}
+	}()
 	for update := range watcher.Updates() {
 		if update == nil {
 			continue
@@ -261,12 +308,62 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 				log.Error().Err(err).Msgf("Failed to prepare directory hierarchy for %q", path)
 				return
 			}
+			info, err := ob.GetInfo(update.Name)
+			if err != nil {
+				log.Error().Err(err).Msgf("Failed to get file info from object store %q", update.Name)
+				return
+			}
 			err = ob.GetFile(update.Name, path)
 			if err != nil {
 				log.Error().Err(err).Msgf("Failed to write file from object store %q", update.Name)
 				return
 			}
+			mode, ok := info.Metadata["mode"]
+			if ok && mode != "" {
+				fileMode, err := strconv.ParseUint(mode, 10, 32)
+				if err != nil {
+					log.Error().Err(err).Msgf("Failed to parse file mode %q from metadata %q", mode, update.Name)
+					return
+				}
+				err = os.Chmod(path, os.FileMode(fileMode))
+				if err != nil {
+					log.Error().Err(err).Msgf("Failed to chmod file %q", path)
+					return
+				}
+			}
+			updates <- update
 		}()
+	}
+}
+
+func putFile(ob natsClient.ObjectStore, path string, op fsnotify.Op) (*natsClient.ObjectInfo, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	sys := info.Sys().(*syscall.Stat_t)
+	meta := &natsClient.ObjectMeta{
+		Name: path,
+		Metadata: map[string]string{
+			"mode": strconv.FormatUint(uint64(info.Mode()), 10),
+			"uid":  strconv.FormatUint(uint64(sys.Uid), 10),
+			"gid":  strconv.FormatUint(uint64(sys.Gid), 10),
+		},
+	}
+	switch {
+	case op.Has(fsnotify.Chmod):
+		err = ob.UpdateMeta(path, meta)
+		if err != nil {
+			return nil, err
+		}
+		return ob.GetInfo(path)
+	default:
+		return ob.Put(meta, f)
 	}
 }
 
@@ -329,8 +426,8 @@ func runServer(wg *sync.WaitGroup, cfg *ServerConfig) {
 					return
 				}
 				log.Info().Msgf("Event %s on %q", event.Op, event.Name)
-				if event.Op.Has(fsnotify.Write) || event.Op.Has(fsnotify.Create) {
-					_, err = ob.PutFile(event.Name)
+				if event.Op.Has(fsnotify.Write) || event.Op.Has(fsnotify.Create) || event.Op.Has(fsnotify.Chmod) {
+					_, err = putFile(ob, event.Name, event.Op)
 					if err != nil {
 						log.Error().Err(err).Msgf("Failed to put file %q", event.Name)
 						continue
@@ -360,7 +457,7 @@ func runServer(wg *sync.WaitGroup, cfg *ServerConfig) {
 				}
 				log.Info().Msgf("Setup watcher for %q", path)
 			case t.IsRegular():
-				_, err = ob.PutFile(path)
+				_, err = putFile(ob, path, 0)
 				if err != nil {
 					log.Fatal().Err(err).Msgf("Failed to put file into object store %q", path)
 				}

@@ -5,7 +5,10 @@
     "ca-cert": "./ca-cert.pem",
     "cert": "./client-cert.pem",
     "key": "./client-key.pem",
-    "prefix": "./tmp-client"
+    "prefix": "./tmp-client",
+    "handler": {
+      "command": ["bash", "-ec", "echo $NDFS_UPDATE_NAME $NDFS_UPDATE_MODE $NDFS_UPDATE_UID $NDFS_UPDATE_GID"]
+    }
   },
   "server": {
     "host": "127.0.0.1",
