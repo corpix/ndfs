@@ -4,8 +4,8 @@ mkdir tmp
 make certs
 
 {
-  echo 'server: go run main.go --services=server'
-  echo 'client: go run main.go --services=client'
+  echo 'server: go run main.go --services=server --verbose'
+  echo 'client: go run main.go --services=client --verbose'
   echo 'test: timeout 120 bash ./test/functional-suite && suite.ok'
 } | hivemind -
 
