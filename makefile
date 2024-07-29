@@ -16,7 +16,7 @@ test: build
 
 .PHONY: functional-test
 functional-test:
-	cd test && ./functional
+	cd test && bash ./functional
 
 .PHONY: certs
 certs:

@@ -7,5 +7,5 @@ make certs
 {
   echo 'server: go run main.go --services=server'
   echo 'client: go run main.go --services=client'
-  echo 'test: ./test/functional-suite'
+  echo 'test: bash ./test/functional-suite'
 } | hivemind -
