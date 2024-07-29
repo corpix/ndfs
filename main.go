@@ -275,10 +275,10 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 					cmd.Env = env
 					output, err := cmd.CombinedOutput()
 					if err != nil {
-						log.Error().Err(err).Msgf("command handler %v failure", cfg.Handler.Command)
+						log.Error().Err(err).Msgf("Command handler %v failure", cfg.Handler.Command)
 						continue
 					}
-					log.Info().Str("output", string(output)).Msgf("command handler %v finished", cfg.Handler.Command)
+					log.Info().Str("output", string(output)).Msgf("Command handler %v finished", cfg.Handler.Command)
 				}
 			}
 		}
