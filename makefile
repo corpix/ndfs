@@ -14,6 +14,10 @@ test: build
 	go vet ./...
 	go test -v ./...
 
+.PHONY: functional-test
+functional-test:
+	cd test && ./functional
+
 .PHONY: certs
 certs:
 	rm -f *.pem *.srl || true

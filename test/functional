@@ -1,0 +1,11 @@
+#! /usr/bin/env bash
+set -e
+cd ..
+mkdir tmp
+make certs
+
+{
+  echo 'server: go run main.go --services=server'
+  echo 'client: go run main.go --services=client'
+  echo 'test: ./test/functional-suite'
+} | hivemind -

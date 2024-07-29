@@ -30,6 +30,7 @@
           pkg-config
           go
           gopls
+          hivemind
         ;
       };
     in {

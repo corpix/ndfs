@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -104,6 +105,11 @@ func app() *cli.App {
 			Name:  "debug",
 			Usage: "be even more verbose about operations performed",
 			Value: false,
+		},
+		&cli.StringFlag{
+			Name:  "services",
+			Usage: "comma separated list of services to run (if they are configured)",
+			Value: "server,client",
 		},
 	}
 	app.Action = run
@@ -572,6 +578,12 @@ func run(ctx *cli.Context) error {
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	}
 
+	services := strings.Split(ctx.String("services"), ",")
+	serviceMap := map[string]bool{}
+	for _, service := range services {
+		serviceMap[service] = true
+	}
+
 	//
 
 	cfg, err := config(ctx.String("config"))
@@ -581,11 +593,11 @@ func run(ctx *cli.Context) error {
 
 	wg := &sync.WaitGroup{}
 
-	if cfg.Server != nil {
+	if cfg.Server != nil && serviceMap["server"] {
 		wg.Add(1)
 		go runServer(wg, cfg.Server)
 	}
-	if cfg.Client != nil {
+	if cfg.Client != nil && serviceMap["client"] {
 		wg.Add(1)
 		go runClient(wg, cfg.Client)
 	}

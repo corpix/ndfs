@@ -1,0 +1,50 @@
+#! /usr/bin/env bash
+set -e
+
+counter=0
+max_attempts=10
+
+while true
+do
+  if [ $counter -eq $max_attempts ]
+  then
+    echo "all attempts failed, giving up waiting server"
+    exit 1
+  fi
+
+  if nc -vz 127.0.0.1 13666
+  then
+    echo "server available"
+    break
+  else
+    sleep 3
+    ((counter++))
+  fi
+done
+
+tree tmp tmp-client > started.state
+mkdir -p tmp/xxx/yyy/zzz
+touch tmp/xxx/yyy/zzz/nested
+sleep 5
+tree tmp tmp-client > hierarchy-created.state
+diff -Nuar started.state hierarchy-created.state && {
+  echo "expected this state will differ"
+  exit 1
+}
+
+echo hello > tmp/xxx/yyy/zzz/nested
+sleep 5
+sha256sum tmp/xxx/yyy/zzz/nested | cut -d' ' -f1 > nested.sum
+sha256sum tmp-client/$(pwd)/tmp/xxx/yyy/zzz/nested | cut -d' ' -f1 > nested-client.sum
+diff -Nuar nested.sum nested-client.sum || {
+  echo "expected file checksums will be the same"
+  exit 1
+}
+
+rm -rf tmp/xxx
+sleep 5
+tree tmp tmp-client > hierarchy-removed.state
+diff -Nuar started.state hierarchy-removed.state || {
+  echo "expected this state will be the same"
+  exit 1
+}
