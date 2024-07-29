@@ -1,25 +1,11 @@
 #! /usr/bin/env bash
 set -e
-
-counter=0
-max_attempts=10
+set -x
 
 while true
 do
-  if [ $counter -eq $max_attempts ]
-  then
-    echo "all attempts failed, giving up waiting server"
-    exit 1
-  fi
-
-  if nc -vz 127.0.0.1 13666
-  then
-    echo "server available"
-    break
-  else
-    sleep 3
-    ((counter++))
-  fi
+  echo waiting for client to start
+  ls tmp-client > /dev/null 2>&1 || sleep 3
 done
 
 tree tmp tmp-client > started.state
