@@ -32,6 +32,7 @@
           gopls
           hivemind
           openssl
+          netcat
         ;
       };
     in {
