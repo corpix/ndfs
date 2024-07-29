@@ -434,12 +434,9 @@ func walkDir(root string, watcher *fsnotify.Watcher, ob natsClient.ObjectStore) 
 		t := d.Type()
 		switch {
 		case t.IsDir():
-			var (
-				alreadyWatched bool
-				parent = filepath.Dir(path)
-			)
+			var alreadyWatched bool
 			for _, watched := range watcher.WatchList() {
-				if parent == watched {
+				if path == watched {
 					alreadyWatched = true
 					break
 				}

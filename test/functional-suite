@@ -16,7 +16,7 @@ done
 tree tmp tmp-client > started.state
 mkdir -p tmp/xxx/yyy/zzz
 touch tmp/xxx/yyy/zzz/nested
-sleep 10
+sleep 2
 tree tmp tmp-client > hierarchy-created.state
 diff -Nuar started.state hierarchy-created.state && {
   echo "expected this state will differ"
@@ -24,16 +24,16 @@ diff -Nuar started.state hierarchy-created.state && {
 }
 
 echo hello > tmp/xxx/yyy/zzz/nested
-sleep 10
+sleep 2
 sha256sum tmp/xxx/yyy/zzz/nested | cut -d' ' -f1 > nested.sum
-sha256sum tmp-client/$(pwd)/tmp/xxx/yyy/zzz/nested | cut -d' ' -f1 > nested-client.sum
+sha256sum tmp-client$(pwd)/tmp/xxx/yyy/zzz/nested | cut -d' ' -f1 > nested-client.sum
 diff -Nuar nested.sum nested-client.sum || {
   echo "expected file checksums will be the same"
   exit 1
 }
 
 rm -rf tmp/xxx
-sleep 10
+sleep 2
 tree tmp tmp-client > hierarchy-removed.state
 diff -Nuar started.state hierarchy-removed.state || {
   echo "expected this state will be the same"
