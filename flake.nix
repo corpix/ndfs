@@ -34,12 +34,12 @@
       };
     in {
       packages.default = buildGoModule {
-        name = "dfuse";
+        name = "ndfs";
         src = ./.;
         vendorHash = null;
       };
       devShells.default = mkShell {
-        name = "dfuse";
+        name = "ndfs";
         packages = envPackages;
       };
     });
