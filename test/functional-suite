@@ -5,7 +5,12 @@ set -x
 while true
 do
   echo waiting for client to start
-  ls tmp-client > /dev/null 2>&1 || sleep 3
+  if ls tmp-client > /dev/null 2>&1
+  then
+    break
+  else
+    sleep 3
+  fi
 done
 
 tree tmp tmp-client > started.state
