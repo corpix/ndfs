@@ -8,9 +8,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -21,8 +23,6 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
 	// "github.com/davecgh/go-spew/spew"
-	"os/exec"
-	"syscall"
 )
 
 type Config struct {
@@ -308,27 +308,35 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 				log.Error().Err(err).Msgf("Failed to prepare directory hierarchy for %q", path)
 				return
 			}
-			info, err := ob.GetInfo(update.Name)
+			info, err := ob.GetInfo(update.Name, natsClient.GetObjectInfoShowDeleted())
 			if err != nil {
 				log.Error().Err(err).Msgf("Failed to get file info from object store %q", update.Name)
 				return
 			}
-			err = ob.GetFile(update.Name, path)
-			if err != nil {
-				log.Error().Err(err).Msgf("Failed to write file from object store %q", update.Name)
-				return
-			}
-			mode, ok := info.Metadata["mode"]
-			if ok && mode != "" {
-				fileMode, err := strconv.ParseUint(mode, 10, 32)
-				if err != nil {
-					log.Error().Err(err).Msgf("Failed to parse file mode %q from metadata %q", mode, update.Name)
+			if info.Deleted {
+				err = os.Remove(path)
+				if err != nil && !os.IsNotExist(err) {
+					log.Error().Err(err).Msgf("Failed to remove file from filesystem %q", update.Name)
 					return
 				}
-				err = os.Chmod(path, os.FileMode(fileMode))
+			} else {
+				err = ob.GetFile(update.Name, path)
 				if err != nil {
-					log.Error().Err(err).Msgf("Failed to chmod file %q", path)
+					log.Error().Err(err).Msgf("Failed to download file from object store %q", update.Name)
 					return
+				}
+				mode, ok := info.Metadata["mode"]
+				if ok && mode != "" {
+					fileMode, err := strconv.ParseUint(mode, 10, 32)
+					if err != nil {
+						log.Error().Err(err).Msgf("Failed to parse file mode %q from metadata %q", mode, update.Name)
+						return
+					}
+					err = os.Chmod(path, os.FileMode(fileMode))
+					if err != nil {
+						log.Error().Err(err).Msgf("Failed to chmod file %q", path)
+						return
+					}
 				}
 			}
 			updates <- update
@@ -337,14 +345,26 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 }
 
 func putFile(ob natsClient.ObjectStore, path string, op fsnotify.Op) (*natsClient.ObjectInfo, error) {
+	if op.Has(fsnotify.Remove) {
+		info, err := ob.GetInfo(path)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to get info from object store")
+		}
+		err = ob.Delete(path)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to delete from object store")
+		}
+		return info, nil
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed to os open")
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed to os stat")
 	}
 	sys := info.Sys().(*syscall.Stat_t)
 	meta := &natsClient.ObjectMeta{
@@ -359,11 +379,19 @@ func putFile(ob natsClient.ObjectStore, path string, op fsnotify.Op) (*natsClien
 	case op.Has(fsnotify.Chmod):
 		err = ob.UpdateMeta(path, meta)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "failed to update meta in object store")
 		}
-		return ob.GetInfo(path)
+		info, err := ob.GetInfo(path)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to get info from object store")
+		}
+		return info, nil
 	default:
-		return ob.Put(meta, f)
+		info, err := ob.Put(meta, f)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to put into object store")
+		}
+		return info, nil
 	}
 }
 
@@ -426,12 +454,10 @@ func runServer(wg *sync.WaitGroup, cfg *ServerConfig) {
 					return
 				}
 				log.Info().Msgf("Event %s on %q", event.Op, event.Name)
-				if event.Op.Has(fsnotify.Write) || event.Op.Has(fsnotify.Create) || event.Op.Has(fsnotify.Chmod) {
-					_, err = putFile(ob, event.Name, event.Op)
-					if err != nil {
-						log.Error().Err(err).Msgf("Failed to put file %q", event.Name)
-						continue
-					}
+				_, err = putFile(ob, event.Name, event.Op)
+				if err != nil {
+					log.Error().Err(err).Msgf("Failed to put file %q", event.Name)
+					continue
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
