@@ -5,16 +5,21 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+	console "github.com/mattn/go-isatty"
 	natsServer "github.com/nats-io/nats-server/v2/server"
 	natsClient "github.com/nats-io/nats.go"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"github.com/urfave/cli/v2"
+	// "github.com/davecgh/go-spew/spew"
 )
 
 type Config struct {
@@ -30,23 +35,30 @@ type ClientConfig struct {
 	Cert         string `json:"cert"`
 	Key          string `json:"key"`
 	tls          *tls.Config
-	Mount        string `json:"mount"`
+	Prefix       string `json:"prefix"`
 }
 
 type ServerConfig struct {
 	Host         string `json:"host"`
 	Port         int    `json:"port"`
 	ReadyTimeout int    `json:"ready-timeout"`
+	MaxPending   int    `json:"max-pending"`
+	StoreDir     string `json:"store-dir"`
 	CACert       string `json:"ca-cert"`
 	Cert         string `json:"cert"`
 	Key          string `json:"key"`
 	tls          *tls.Config
-	Bind         map[string]BindConfig `json:"bind"`
+	Bind         []string `json:"bind"`
 }
 
-type BindConfig struct {
-	Name string `json:"name"`
-}
+//
+
+const (
+	FilesystemBucket = "files"
+	FilesystemStream = "filesystem"
+)
+
+//
 
 type Logger struct{ log zerolog.Logger }
 
@@ -146,6 +158,12 @@ func config(path string) (*Config, error) {
 		if cfg.Server.ReadyTimeout == 0 {
 			cfg.Server.ReadyTimeout = 15
 		}
+		if cfg.Server.MaxPending == 0 {
+			cfg.Server.MaxPending = 256
+		}
+		if cfg.Server.StoreDir == "" {
+			cfg.Server.StoreDir = "./store"
+		}
 		caCert, err := os.ReadFile(cfg.Server.CACert)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to read CA cert %q", cfg.Server.CACert)
@@ -179,6 +197,7 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 		natsClient.RetryOnFailedConnect(true),
 		natsClient.MaxReconnects(2),
 		natsClient.ReconnectJitter(500*time.Millisecond, 2*time.Second),
+		natsClient.Timeout(5*time.Second),
 	)
 	if err != nil {
 		log.Fatal().Err(err).Msgf("Failed to connect to %q:%d", cfg.Host, cfg.Port)
@@ -200,9 +219,55 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 	select {
 	case <-connected:
 	case <-time.After(time.Duration(cfg.ReadyTimeout * int(time.Second))):
-			log.Fatal().Msgf("Client connection not ready after %d seconds", cfg.ReadyTimeout)
+		log.Fatal().Msgf("Client connection not ready after %d seconds", cfg.ReadyTimeout)
 	}
 	log.Info().Msg("Client is ready")
+
+	js, err := nc.JetStream()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create nats jetstream")
+	}
+	ob, err := js.ObjectStore(FilesystemBucket)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create nats object store for files")
+	}
+	watcher, err := ob.Watch()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create nats object store watcher")
+	}
+	for update := range watcher.Updates() {
+		if update == nil {
+			continue
+		}
+		log.Info().
+			Str("digest", update.Digest).
+			Str("name", update.Name).
+			Msg("Object changed")
+		func() {
+			path := update.Name
+			if cfg.Prefix != "" {
+				path = filepath.Join(cfg.Prefix, path)
+			}
+			pathAbs, err := filepath.Abs(path)
+			if err != nil {
+				log.Error().Err(err).Msgf("Failed to resolve path %q", path)
+				return
+			}
+			path = pathAbs
+
+			// todo: sync chmod
+			err = os.MkdirAll(filepath.Dir(path), os.ModePerm)
+			if err != nil {
+				log.Error().Err(err).Msgf("Failed to prepare directory hierarchy for %q", path)
+				return
+			}
+			err = ob.GetFile(update.Name, path)
+			if err != nil {
+				log.Error().Err(err).Msgf("Failed to write file from object store %q", update.Name)
+				return
+			}
+		}()
+	}
 }
 
 func runServer(wg *sync.WaitGroup, cfg *ServerConfig) {
@@ -217,13 +282,15 @@ func runServer(wg *sync.WaitGroup, cfg *ServerConfig) {
 		TLS:        true,
 		TLSVerify:  true,
 		TLSTimeout: 5,
+		JetStream:  true,
+		StoreDir:   cfg.StoreDir,
 	}
 	ns, err := natsServer.NewServer(opts)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create server")
 	}
 	ns.SetLoggerV2(
-		Logger{log: log.Logger.With().Str("logger", "nats").Logger()},
+		Logger{log: log.With().Str("logger", "nats").Logger()},
 		true, true, true,
 	)
 
@@ -231,6 +298,80 @@ func runServer(wg *sync.WaitGroup, cfg *ServerConfig) {
 	if !ns.ReadyForConnections(time.Duration(cfg.ReadyTimeout * int(time.Second))) {
 		log.Fatal().Msgf("Server not ready to accept connections after %d seconds", cfg.ReadyTimeout)
 	}
+
+	nc, err := natsClient.Connect("", natsClient.InProcessServer(ns))
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create an in-process nats connection")
+	}
+	js, err := nc.JetStream(natsClient.PublishAsyncMaxPending(cfg.MaxPending))
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create nats jetstream")
+	}
+	js.AddStream(&natsClient.StreamConfig{
+		Name:    FilesystemStream,
+		Storage: natsClient.FileStorage,
+	})
+	ob, err := js.CreateObjectStore(&natsClient.ObjectStoreConfig{Bucket: FilesystemBucket})
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create nats object store for files")
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create fsnotify watcher")
+	}
+	defer watcher.Close()
+	go func() {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				log.Info().Msgf("Event %s on %q", event.Op, event.Name)
+				if event.Op.Has(fsnotify.Write) || event.Op.Has(fsnotify.Create) {
+					_, err = ob.PutFile(event.Name)
+					if err != nil {
+						log.Error().Err(err).Msgf("Failed to put file %q", event.Name)
+						continue
+					}
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Error().Err(err).Msg("Watcher error")
+			}
+		}
+	}()
+
+	for _, bindPath := range cfg.Bind {
+		absBindPath, err := filepath.Abs(bindPath)
+		if err != nil {
+			log.Fatal().Err(err).Msgf("Failed to expand path %q", bindPath)
+		}
+		err = filepath.WalkDir(absBindPath, func(path string, d fs.DirEntry, err error) error {
+			t := d.Type()
+			switch {
+			case t.IsDir():
+				err = watcher.Add(path)
+				if err != nil {
+					log.Fatal().Err(err).Msgf("Failed to add watcher for %q", path)
+				}
+				log.Info().Msgf("Setup watcher for %q", path)
+			case t.IsRegular():
+				_, err = ob.PutFile(path)
+				if err != nil {
+					log.Fatal().Err(err).Msgf("Failed to put file into object store %q", path)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Fatal().Err(err).Msgf("Failed to walk directory %q", bindPath)
+		}
+	}
+
 	ns.WaitForShutdown()
 }
 
@@ -269,6 +410,16 @@ func run(ctx *cli.Context) error {
 	log.Info().Msg("Exiting")
 
 	return nil
+}
+
+var log zerolog.Logger
+
+func init() {
+	var w io.Writer = os.Stderr
+	if console.IsTerminal(os.Stderr.Fd()) {
+		w = zerolog.ConsoleWriter{Out: os.Stderr}
+	}
+	log = zerolog.New(w).With().Timestamp().Logger()
 }
 
 func main() {

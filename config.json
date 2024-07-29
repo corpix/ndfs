@@ -5,7 +5,7 @@
     "ca-cert": "./ca-cert.pem",
     "cert": "./client-cert.pem",
     "key": "./client-key.pem",
-    "mount": "./tmp"
+    "prefix": "./tmp-client"
   },
   "server": {
     "host": "127.0.0.1",
@@ -13,9 +13,6 @@
     "ca-cert": "./ca-cert.pem",
     "cert": "./server-cert.pem",
     "key": "./server-key.pem",
-    "bind": {
-      "./": {"name": "root"},
-      "/tmp": {"name": "tmp"}
-    }
+    "bind": ["./tmp"]
   }
 }

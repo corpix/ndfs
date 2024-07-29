@@ -7,7 +7,7 @@ all: build
 
 .PHONY: build
 build:
-	go build -o dfuse main.go
+	go build -o ndfs main.go
 
 .PHONY: test
 test: build

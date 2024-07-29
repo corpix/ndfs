@@ -1,5 +1,7 @@
 /result
 /tmp
+/tmp-client
+/store
 /*.pem
 /*.srl
-/dfuse
+/ndfs
