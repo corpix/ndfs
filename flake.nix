@@ -31,6 +31,7 @@
           go
           gopls
           hivemind
+          openssl
         ;
       };
     in {
