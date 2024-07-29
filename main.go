@@ -270,6 +270,7 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 						fmt.Sprintf("NDFS_UPDATE_MODE=%s", update.Metadata["mode"]),
 						fmt.Sprintf("NDFS_UPDATE_UID=%s", update.Metadata["uid"]),
 						fmt.Sprintf("NDFS_UPDATE_GID=%s", update.Metadata["gid"]),
+						fmt.Sprintf("NDFS_UPDATE_ISDIR=%s", update.Metadata["isdir"]),
 					}...)
 					cmd.Env = env
 					output, err := cmd.CombinedOutput()
@@ -302,30 +303,46 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 			}
 			path = pathAbs
 
-			// todo: sync chmod
 			err = os.MkdirAll(filepath.Dir(path), os.ModePerm)
 			if err != nil {
 				log.Error().Err(err).Msgf("Failed to prepare directory hierarchy for %q", path)
 				return
 			}
-			info, err := ob.GetInfo(update.Name, natsClient.GetObjectInfoShowDeleted())
+			objInfo, err := ob.GetInfo(update.Name, natsClient.GetObjectInfoShowDeleted())
 			if err != nil {
 				log.Error().Err(err).Msgf("Failed to get file info from object store %q", update.Name)
 				return
 			}
-			if info.Deleted {
-				err = os.Remove(path)
+			if objInfo.Deleted {
+				err = os.RemoveAll(path)
 				if err != nil && !os.IsNotExist(err) {
 					log.Error().Err(err).Msgf("Failed to remove file from filesystem %q", update.Name)
 					return
 				}
 			} else {
-				err = ob.GetFile(update.Name, path)
-				if err != nil {
-					log.Error().Err(err).Msgf("Failed to download file from object store %q", update.Name)
-					return
+				var isDir bool
+				metaIsDir, ok := objInfo.Metadata["isdir"]
+				if ok {
+					isDir, err = strconv.ParseBool(metaIsDir)
+					if err != nil {
+						log.Error().Err(err).Msgf("Failed to parse isdir meta %q for %q", metaIsDir, update.Name)
+						return
+					}
 				}
-				mode, ok := info.Metadata["mode"]
+				if isDir {
+					err = os.Mkdir(path, os.ModePerm)
+					if err != nil && !os.IsExist(err) {
+						log.Error().Err(err).Msgf("Failed to create directory %q", path)
+						return
+					}
+				} else {
+					err = ob.GetFile(update.Name, path)
+					if err != nil {
+						log.Error().Err(err).Msgf("Failed to download file from object store %q", update.Name)
+						return
+					}
+				}
+				mode, ok := objInfo.Metadata["mode"]
 				if ok && mode != "" {
 					fileMode, err := strconv.ParseUint(mode, 10, 32)
 					if err != nil {
@@ -344,55 +361,97 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 	}
 }
 
-func putFile(ob natsClient.ObjectStore, path string, op fsnotify.Op) (*natsClient.ObjectInfo, error) {
+func putObject(ob natsClient.ObjectStore, path string, op fsnotify.Op) (*natsClient.ObjectInfo, error) {
 	if op.Has(fsnotify.Remove) {
 		info, err := ob.GetInfo(path)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to get info from object store")
+			return nil, errors.Wrapf(err, "failed to get info from object store for %q", path)
 		}
 		err = ob.Delete(path)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to delete from object store")
+			return nil, errors.Wrapf(err, "failed to delete info from object store for %q", path)
 		}
 		return info, nil
 	}
 
-	f, err := os.Open(path)
+	info, err := os.Stat(path)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to os open")
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to os stat")
+		return nil, errors.Wrapf(err, "failed to os stat %q", path)
 	}
 	sys := info.Sys().(*syscall.Stat_t)
 	meta := &natsClient.ObjectMeta{
 		Name: path,
 		Metadata: map[string]string{
-			"mode": strconv.FormatUint(uint64(info.Mode()), 10),
-			"uid":  strconv.FormatUint(uint64(sys.Uid), 10),
-			"gid":  strconv.FormatUint(uint64(sys.Gid), 10),
+			"mode":  strconv.FormatUint(uint64(info.Mode()), 10),
+			"uid":   strconv.FormatUint(uint64(sys.Uid), 10),
+			"gid":   strconv.FormatUint(uint64(sys.Gid), 10),
+			"isdir": strconv.FormatBool(info.IsDir()),
 		},
 	}
 	switch {
-	case op.Has(fsnotify.Chmod):
+	case op.Has(fsnotify.Chmod) || info.IsDir():
+		if info.IsDir() {
+			_, err = ob.PutBytes(path, nil)
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed to put bytes into object store for %q", path)
+			}
+		}
 		err = ob.UpdateMeta(path, meta)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to update meta in object store")
+			return nil, errors.Wrapf(err, "failed to update meta in object store for %q", path)
 		}
-		info, err := ob.GetInfo(path)
+		objInfo, err := ob.GetInfo(path)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to get info from object store")
+			return nil, errors.Wrapf(err, "failed to get info from object store for %q", path)
 		}
-		return info, nil
+		return objInfo, nil
 	default:
-		info, err := ob.Put(meta, f)
+		f, err := os.Open(path)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to put into object store")
+			return nil, errors.Wrapf(err, "failed to os open %q", path)
 		}
-		return info, nil
+		defer f.Close()
+		objInfo, err := ob.Put(meta, f)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to put into object store for %q", path)
+		}
+		return objInfo, nil
 	}
+}
+
+func walkDir(root string, watcher *fsnotify.Watcher, ob natsClient.ObjectStore) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		t := d.Type()
+		switch {
+		case t.IsDir():
+			var (
+				alreadyWatched bool
+				parent = filepath.Dir(path)
+			)
+			for _, watched := range watcher.WatchList() {
+				if parent == watched {
+					alreadyWatched = true
+					break
+				}
+			}
+			if !alreadyWatched {
+				err = watcher.Add(path)
+				if err != nil {
+					log.Fatal().Err(err).Msgf("Failed to add watcher for %q", path)
+				}
+				log.Info().Msgf("Setup watcher for %q", path)
+			}
+		}
+		_, err = putObject(ob, path, 0)
+		if err != nil {
+			log.Fatal().Err(err).Msgf("Failed to put file into object store %q", path)
+		}
+		return nil
+	})
 }
 
 func runServer(wg *sync.WaitGroup, cfg *ServerConfig) {
@@ -454,7 +513,21 @@ func runServer(wg *sync.WaitGroup, cfg *ServerConfig) {
 					return
 				}
 				log.Info().Msgf("Event %s on %q", event.Op, event.Name)
-				_, err = putFile(ob, event.Name, event.Op)
+				if !event.Op.Has(fsnotify.Remove) {
+					t, err := os.Stat(event.Name)
+					if err != nil {
+						log.Error().Err(err).Msgf("Failed to stat file %q", event.Name)
+						continue
+					}
+					if t.IsDir() && event.Op.Has(fsnotify.Create) {
+						err = walkDir(event.Name, watcher, ob)
+						if err != nil {
+							log.Error().Err(err).Msgf("Failed to walk dir %q", event.Name)
+						}
+						continue
+					}
+				}
+				_, err = putObject(ob, event.Name, event.Op)
 				if err != nil {
 					log.Error().Err(err).Msgf("Failed to put file %q", event.Name)
 					continue
@@ -468,30 +541,18 @@ func runServer(wg *sync.WaitGroup, cfg *ServerConfig) {
 		}
 	}()
 
-	for _, bindPath := range cfg.Bind {
-		absBindPath, err := filepath.Abs(bindPath)
+	for _, path := range cfg.Bind {
+		absPath, err := filepath.Abs(path)
 		if err != nil {
-			log.Fatal().Err(err).Msgf("Failed to expand path %q", bindPath)
+			log.Fatal().Err(err).Msgf("Failed to expand path %q", path)
 		}
-		err = filepath.WalkDir(absBindPath, func(path string, d fs.DirEntry, err error) error {
-			t := d.Type()
-			switch {
-			case t.IsDir():
-				err = watcher.Add(path)
-				if err != nil {
-					log.Fatal().Err(err).Msgf("Failed to add watcher for %q", path)
-				}
-				log.Info().Msgf("Setup watcher for %q", path)
-			case t.IsRegular():
-				_, err = putFile(ob, path, 0)
-				if err != nil {
-					log.Fatal().Err(err).Msgf("Failed to put file into object store %q", path)
-				}
-			}
-			return nil
-		})
+		err = watcher.Add(absPath)
 		if err != nil {
-			log.Fatal().Err(err).Msgf("Failed to walk directory %q", bindPath)
+			log.Fatal().Err(err).Msgf("Failed to add watcher for %q", path)
+		}
+		err = walkDir(absPath, watcher, ob)
+		if err != nil {
+			log.Fatal().Err(err).Msgf("Failed to walk directory %q", path)
 		}
 	}
 
