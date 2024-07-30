@@ -1,4 +1,4 @@
-module git.tatikoma.dev/corpix/dfuse
+module git.tatikoma.dev/corpix/ndfs
 
 go 1.22.5
 
