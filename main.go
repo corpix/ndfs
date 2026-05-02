@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -40,7 +41,15 @@ type ClientConfig struct {
 	Key          string `json:"key"`
 	tls          *tls.Config
 	Prefix       string         `json:"prefix"`
+	Sync         *SyncConfig    `json:"sync"`
 	Handler      *HandlerConfig `json:"handler"`
+}
+
+type SyncConfig struct {
+	Owner         string `json:"owner"`
+	Group         string `json:"group"`
+	FileMode      string `json:"file-mode"`
+	DirectoryMode string `json:"directory-mode"`
 }
 
 type HandlerConfig struct {
@@ -114,6 +123,127 @@ func app() *cli.App {
 	}
 	app.Action = run
 	return app
+}
+
+func resolveUserID(value string) (int, error) {
+	id, err := strconv.Atoi(value)
+	if err == nil {
+		return id, nil
+	}
+
+	u, err := user.Lookup(value)
+	if err != nil {
+		return 0, err
+	}
+
+	id, err = strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, err
+	}
+
+	return id, nil
+}
+
+func resolveGroupID(value string) (int, error) {
+	id, err := strconv.Atoi(value)
+	if err == nil {
+		return id, nil
+	}
+
+	g, err := user.LookupGroup(value)
+	if err != nil {
+		return 0, err
+	}
+
+	id, err = strconv.Atoi(g.Gid)
+	if err != nil {
+		return 0, err
+	}
+
+	return id, nil
+}
+
+func parseDeclaredMode(value string) (os.FileMode, error) {
+	mode, err := strconv.ParseUint(value, 8, 32)
+	if err == nil {
+		return os.FileMode(mode), nil
+	}
+
+	mode, err = strconv.ParseUint(value, 0, 32)
+	if err != nil {
+		return 0, err
+	}
+
+	return os.FileMode(mode), nil
+}
+
+func applySync(path string, isDir bool, cfg *SyncConfig, metadata map[string]string) error {
+	if cfg != nil && (cfg.Owner != "" || cfg.Group != "") {
+		info, err := os.Stat(path)
+		if err != nil {
+			return errors.Wrapf(err, "failed to stat %q for ownership sync", path)
+		}
+
+		sys := info.Sys().(*syscall.Stat_t)
+		uid := int(sys.Uid)
+		gid := int(sys.Gid)
+
+		if cfg.Owner != "" {
+			uid, err = resolveUserID(cfg.Owner)
+			if err != nil {
+				return errors.Wrapf(err, "failed to resolve owner %q", cfg.Owner)
+			}
+		}
+
+		if cfg.Group != "" {
+			gid, err = resolveGroupID(cfg.Group)
+			if err != nil {
+				return errors.Wrapf(err, "failed to resolve group %q", cfg.Group)
+			}
+		}
+
+		err = os.Chown(path, uid, gid)
+		if err != nil {
+			return errors.Wrapf(err, "failed to chown %q", path)
+		}
+	}
+
+	mode := metadata["mode"]
+	if cfg != nil {
+		if isDir && cfg.DirectoryMode != "" {
+			mode = cfg.DirectoryMode
+		}
+		if !isDir && cfg.FileMode != "" {
+			mode = cfg.FileMode
+		}
+	}
+
+	if mode == "" {
+		return nil
+	}
+
+	var (
+		fileMode os.FileMode
+		err error
+	)
+
+	if cfg != nil && ((isDir && cfg.DirectoryMode != "") || (!isDir && cfg.FileMode != "")) {
+		fileMode, err = parseDeclaredMode(mode)
+	} else {
+		var parsed uint64
+		parsed, err = strconv.ParseUint(mode, 10, 32)
+		fileMode = os.FileMode(parsed)
+	}
+	if err != nil {
+		return errors.Wrapf(err, "failed to parse mode %q for %q", mode, path)
+	}
+
+	err = os.Chmod(path, fileMode)
+	if err != nil {
+		return errors.Wrapf(err, "failed to chmod %q", path)
+	}
+
+	return nil
 }
 
 func config(path string) (*Config, error) {
@@ -348,18 +478,10 @@ func runClient(wg *sync.WaitGroup, cfg *ClientConfig) {
 						return
 					}
 				}
-				mode, ok := objInfo.Metadata["mode"]
-				if ok && mode != "" {
-					fileMode, err := strconv.ParseUint(mode, 10, 32)
-					if err != nil {
-						log.Error().Err(err).Msgf("Failed to parse file mode %q from metadata %q", mode, update.Name)
-						return
-					}
-					err = os.Chmod(path, os.FileMode(fileMode))
-					if err != nil {
-						log.Error().Err(err).Msgf("Failed to chmod file %q", path)
-						return
-					}
+				err = applySync(path, isDir, cfg.Sync, objInfo.Metadata)
+				if err != nil {
+					log.Error().Err(err).Msgf("Failed to sync file attributes for %q", path)
+					return
 				}
 			}
 			updates <- update
