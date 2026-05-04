@@ -71,6 +71,38 @@ type ServerConfig struct {
 	Bind         []string `json:"bind"`
 }
 
+func (c *ClientConfig) Configured() bool {
+	if c == nil {
+		return false
+	}
+
+	return c.Host != "" ||
+		c.Port != 0 ||
+		c.ReadyTimeout != 0 ||
+		c.CACert != "" ||
+		c.Cert != "" ||
+		c.Key != "" ||
+		c.Prefix != "" ||
+		c.Sync != nil ||
+		c.Handler != nil
+}
+
+func (c *ServerConfig) Configured() bool {
+	if c == nil {
+		return false
+	}
+
+	return c.Host != "" ||
+		c.Port != 0 ||
+		c.ReadyTimeout != 0 ||
+		c.MaxPending != 0 ||
+		c.StoreDir != "" ||
+		c.CACert != "" ||
+		c.Cert != "" ||
+		c.Key != "" ||
+		len(c.Bind) > 0
+}
+
 //
 
 const (
@@ -224,7 +256,7 @@ func applySync(path string, isDir bool, cfg *SyncConfig, metadata map[string]str
 
 	var (
 		fileMode os.FileMode
-		err error
+		err      error
 	)
 
 	if cfg != nil && ((isDir && cfg.DirectoryMode != "") || (!isDir && cfg.FileMode != "")) {
@@ -246,7 +278,7 @@ func applySync(path string, isDir bool, cfg *SyncConfig, metadata map[string]str
 	return nil
 }
 
-func config(path string) (*Config, error) {
+func config(path string, services map[string]bool) (*Config, error) {
 	fd, err := os.Open(path)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to open ocnfiguration file %q", path)
@@ -259,11 +291,18 @@ func config(path string) (*Config, error) {
 		return nil, err
 	}
 
+	if !cfg.Client.Configured() {
+		cfg.Client = nil
+	}
+	if !cfg.Server.Configured() {
+		cfg.Server = nil
+	}
+
 	if cfg.Server == nil && cfg.Client == nil {
 		return nil, errors.New("neither server or client is ocnfigured, exiting")
 	}
 
-	if cfg.Client != nil {
+	if cfg.Client != nil && services["client"] {
 		if cfg.Client.Host == "" {
 			cfg.Client.Host = "127.0.0.1"
 		}
@@ -305,7 +344,7 @@ func config(path string) (*Config, error) {
 		}
 	}
 
-	if cfg.Server != nil {
+	if cfg.Server != nil && services["server"] {
 		if cfg.Server.Host == "" {
 			cfg.Server.Host = "127.0.0.1"
 		}
@@ -705,7 +744,7 @@ func run(ctx *cli.Context) error {
 
 	//
 
-	cfg, err := config(ctx.String("config"))
+	cfg, err := config(ctx.String("config"), serviceMap)
 	if err != nil {
 		return err
 	}
